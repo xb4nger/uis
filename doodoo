@@ -1,0 +1,768 @@
+-- ESP Preview addon for the Library
+-- Paste right above the library's final `return Library` (it must run BEFORE you call Library:Window).
+-- Adds: Library:ESPPreview(Params), Library:SetESPPreview(Bool)
+--
+-- Then add this to Library.InitWindow, directly under the "Menu Bind" label in UISettingsSection:
+--
+--     UISettingsSection:Toggle({
+--         Name = "ESP Preview",
+--         Flag = "ShowESPPreview",
+--         Default = true,
+--         Callback = function(Value)
+--             if Library.SetESPPreview then
+--                 Library:SetESPPreview(Value)
+--             end
+--         end
+--     })
+
+local Library = getgenv().Library
+local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
+local UserInputService = game:GetService("UserInputService")
+local GuiInset = GuiService:GetGuiInset().Y
+
+local Stroke = function(Parent, ThemeKey, BorderOffset)
+    local Properties = {
+        Name = "\0",
+        Parent = Parent,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+        LineJoinMode = Enum.LineJoinMode.Miter,
+        Color = Library.Theme[ThemeKey]
+    }
+
+    if BorderOffset then
+        Properties.BorderOffset = UDim.new(0, BorderOffset)
+    end
+
+    return Library:Create("UIStroke", Properties):AddToTheme({Color = ThemeKey})
+end
+
+-- keep track of the window so the preview can dock to it and follow open/close
+do
+    local OldWindow = Library.Window
+
+    Library.Window = function(Self, Params)
+        local Win = OldWindow(Self, Params)
+        Library.CurrentWindow = Win
+
+        local OldSetOpen = Win.SetOpen
+
+        Win.SetOpen = function(W, Bool)
+            local Before = W.IsOpen
+            OldSetOpen(W, Bool)
+
+            if W.IsOpen ~= Before then
+                local Preview = Library.ESPPreviewObject
+
+                if Preview and Library.ESPPreviewEnabled then
+                    if W.IsOpen then
+                        Preview:Open()
+                    else
+                        Preview:Close()
+                    end
+                end
+            end
+        end
+
+        return Win
+    end
+end
+
+Library.SetESPPreview = function(Self, Bool)
+    Library.ESPPreviewEnabled = Bool and true or false
+
+    local Preview = Library.ESPPreviewObject
+
+    if Bool then
+        if not Preview then
+            Library:ESPPreview({})
+            return
+        end
+
+        local Win = Library.CurrentWindow
+
+        if Win and Win.IsOpen then
+            Preview:Open()
+        end
+    elseif Preview then
+        Preview:Close()
+    end
+end
+
+Library.ESPPreview = function(Self, Params)
+    Params = Params or { }
+
+    if Library.ESPPreviewEnabled == nil then
+        Library.ESPPreviewEnabled = true
+    end
+
+    local Preview = {
+        Name = Params.Name or Params.name or "ESP Preview",
+        Animate = Params.Animate ~= false,
+        Yaw = 0,
+        Binds = nil,
+        Shown = false,
+        Items = { }
+    }
+
+    -- everything the preview can show; change with Preview:Set(Key, Value)
+    local State = {
+        Box = true,
+        BoxStyle = "Full",              -- "Full" | "Corner"
+        BoxColor = Library.Theme.Accent,
+        BoxFill = false,
+        BoxFillColor = Library.Theme.Accent,
+        BoxFillAlpha = 0.85,            -- transparency of the fill
+
+        Name = true,
+        NameColor = Library.Theme.Text,
+
+        Health = true,
+        HealthValue = 100,
+
+        Distance = true,
+        DistanceColor = Library.Theme["Inactive Text"],
+
+        Weapon = true,
+        WeaponColor = Library.Theme["Inactive Text"],
+
+        Skeleton = false,
+        SkeletonColor = Color3.fromRGB(255, 255, 255),
+
+        Chams = false,
+        ChamsColor = Library.Theme.Accent,
+        ChamsAlpha = 0.5,               -- transparency of the chams
+    }
+
+    local StageWidth, StageHeight = 204, 250
+    local BoxY, BoxHeight, BoxHalfWidth = 52, 150, 48
+    local K = 10 -- pixels per stud in the preview
+
+    local Items = { } do
+        Items["Preview"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Library.Holder.Instance,
+            AnchorPoint = Vector2.new(0, 0),
+            Position = UDim2.new(1, -240, 0.5, -146),
+            Size = UDim2.new(0, 220, 0, 292),
+            BorderSizePixel = 0,
+            Visible = false,
+            BackgroundColor3 = Library.Theme["Inline"]
+        }):AddToTheme({BackgroundColor3 = "Inline"})
+
+        Items["Preview"]:MakeDraggable()
+
+        if UserInputService.TouchEnabled then
+            Library:Create("UIScale", {
+                Name = "\0",
+                Parent = Items["Preview"].Instance,
+                Scale = 0.75
+            })
+        end
+
+        Items["UIStroke"] = Stroke(Items["Preview"].Instance, "Outline")
+
+        Library:Create("UIGradient", {
+            Name = "\0",
+            Parent = Items["UIStroke"].Instance,
+            Rotation = 90,
+            Transparency = NumberSequence.new{
+                NumberSequenceKeypoint.new(0, 0),
+                NumberSequenceKeypoint.new(1, 0.637499988079071)
+            }
+        })
+
+        Stroke(Items["Preview"].Instance, "Outline 2", 1)
+
+        Items["Title"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Library.BoldFont,
+            TextSize = Library.FontSize,
+            Parent = Items["Preview"].Instance,
+            TextColor3 = Library.Theme["Text"],
+            Text = Preview.Name,
+            Size = UDim2.new(0, 0, 0, 15),
+            Position = UDim2.new(0, 10, 0, 6),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = "Text"})
+
+        Items["Liner"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["Preview"].Instance,
+            Position = UDim2.new(0, 8, 0, 24),
+            Size = UDim2.new(1, -16, 0, 2),
+            BorderSizePixel = 0,
+            BackgroundColor3 = Library.Theme["Accent"]
+        }):AddToTheme({BackgroundColor3 = "Accent"})
+
+        Items["Stage"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["Preview"].Instance,
+            Position = UDim2.new(0, 8, 0, 32),
+            Size = UDim2.new(0, StageWidth, 0, StageHeight),
+            BorderSizePixel = 0,
+            ClipsDescendants = true,
+            BackgroundColor3 = Library.Theme["Background"]
+        }):AddToTheme({BackgroundColor3 = "Background"})
+
+        Stroke(Items["Stage"].Instance, "Outline")
+        Stroke(Items["Stage"].Instance, "Outline 2", 1)
+
+        local Stage = Items["Stage"].Instance
+
+        -- floor line under the dummy
+        Items["Floor"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Stage,
+            AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(0.5, 0, 0, 204),
+            Size = UDim2.new(0, 120, 0, 1),
+            BorderSizePixel = 0,
+            BackgroundColor3 = Library.Theme["Outline"]
+        }):AddToTheme({BackgroundColor3 = "Outline"})
+
+        -- 3d dummy (rotates with yaw)
+        Items["Viewport"] = Library:Create("ViewportFrame", {
+            Name = "\0",
+            Parent = Stage,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Ambient = Color3.fromRGB(175, 175, 175),
+            LightColor = Color3.fromRGB(255, 255, 255),
+            LightDirection = Vector3.new(-0.5, -1, -0.8),
+            ZIndex = 1
+        })
+
+        local ViewportCamera = Instance.new("Camera")
+        local VisibleStuds = StageHeight / K
+        local CameraDistance = (VisibleStuds / 2) / math.tan(math.rad(10 / 2))
+
+        ViewportCamera.FieldOfView = 10
+        ViewportCamera.CFrame = CFrame.lookAt(Vector3.new(0, 0, CameraDistance), Vector3.new(0, 0, 0))
+        ViewportCamera.Parent = Items["Viewport"].Instance
+        Items["Viewport"].Instance.CurrentCamera = ViewportCamera
+
+        local Parts = { }
+
+        local MakePart = function(Offset, Size, IsBall, IsNose)
+            local Part = Instance.new("Part")
+            Part.Anchored = true
+            Part.CanCollide = false
+            Part.CanTouch = false
+            Part.CanQuery = false
+            Part.Material = Enum.Material.SmoothPlastic
+            Part.TopSurface = Enum.SurfaceType.Smooth
+            Part.BottomSurface = Enum.SurfaceType.Smooth
+            Part.Size = Size
+
+            if IsBall then
+                Part.Shape = Enum.PartType.Ball
+            end
+
+            Part.Parent = Items["Viewport"].Instance
+
+            table.insert(Parts, {Part = Part, Offset = Offset, IsNose = IsNose or false})
+        end
+
+        MakePart(Vector3.new(0, 5.3, 0), Vector3.new(2.4, 2.4, 2.4), true)             -- head
+        MakePart(Vector3.new(0, 5.3, 1.3), Vector3.new(0.6, 0.4, 0.5), false, true)    -- nose (shows facing)
+        MakePart(Vector3.new(0, 1.1, 0), Vector3.new(4, 5.6, 2))                       -- torso
+        MakePart(Vector3.new(-2.7, 1.1, 0), Vector3.new(1.2, 5.2, 1.2))                -- left arm
+        MakePart(Vector3.new(2.7, 1.1, 0), Vector3.new(1.2, 5.2, 1.2))                 -- right arm
+        MakePart(Vector3.new(-0.9, -4.6, 0), Vector3.new(1.8, 5.8, 1.2))               -- left leg
+        MakePart(Vector3.new(0.9, -4.6, 0), Vector3.new(1.8, 5.8, 1.2))                -- right leg
+
+        Items["Parts"] = Parts
+
+        -- drag area for rotating (sits under the esp elements, above the viewport)
+        Items["Rotate"] = Library:Create("TextButton", {
+            Name = "\0",
+            Parent = Stage,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ZIndex = 2
+        })
+
+        -- skeleton (joints in studs, x/y plane; follows the yaw)
+        local Skeleton = { }
+
+        local Segments = {
+            {0, 5.3, 0, 3.9}, {0, 3.9, 0, -1.7},
+            {-2.7, 3.5, 2.7, 3.5},
+            {-2.7, 3.5, -2.7, -1.3}, {2.7, 3.5, 2.7, -1.3},
+            {-0.9, -1.7, 0.9, -1.7},
+            {-0.9, -1.7, -0.9, -7.5}, {0.9, -1.7, 0.9, -7.5},
+        }
+
+        for _, Segment in Segments do
+            local Line = Library:Create("Frame", {
+                Name = "\0",
+                Parent = Stage,
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Size = UDim2.new(0, 2, 0, 1),
+                BorderSizePixel = 0,
+                Visible = false,
+                ZIndex = 3,
+                BackgroundColor3 = State.SkeletonColor
+            })
+
+            table.insert(Skeleton, {Line = Line, Points = Segment})
+        end
+
+        Items["Skeleton"] = Skeleton
+
+        -- full box
+        Items["FullBox"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Stage,
+            AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(0.5, 0, 0, BoxY),
+            Size = UDim2.new(0, BoxHalfWidth * 2, 0, BoxHeight),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            ZIndex = 4,
+            BackgroundColor3 = State.BoxFillColor
+        })
+
+        Items["FullBoxStroke"] = Library:Create("UIStroke", {
+            Name = "\0",
+            Parent = Items["FullBox"].Instance,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            LineJoinMode = Enum.LineJoinMode.Miter,
+            Color = State.BoxColor
+        })
+
+        -- corner box (8 pieces)
+        local Corners = { }
+        local CornerLength = 14
+
+        local MakeCorner = function(Anchor, X, Y, W, H)
+            local Piece = Library:Create("Frame", {
+                Name = "\0",
+                Parent = Stage,
+                AnchorPoint = Anchor,
+                Position = UDim2.new(0.5, X, 0, Y),
+                Size = UDim2.new(0, W, 0, H),
+                BorderSizePixel = 0,
+                Visible = false,
+                ZIndex = 4,
+                BackgroundColor3 = State.BoxColor
+            })
+
+            table.insert(Corners, Piece)
+        end
+
+        local Left, Right = -BoxHalfWidth, BoxHalfWidth
+        local Top, Bottom = BoxY, BoxY + BoxHeight
+
+        MakeCorner(Vector2.new(0, 0), Left, Top, CornerLength, 1)
+        MakeCorner(Vector2.new(0, 0), Left, Top, 1, CornerLength)
+        MakeCorner(Vector2.new(1, 0), Right, Top, CornerLength, 1)
+        MakeCorner(Vector2.new(1, 0), Right, Top, 1, CornerLength)
+        MakeCorner(Vector2.new(0, 1), Left, Bottom, CornerLength, 1)
+        MakeCorner(Vector2.new(0, 1), Left, Bottom, 1, CornerLength)
+        MakeCorner(Vector2.new(1, 1), Right, Bottom, CornerLength, 1)
+        MakeCorner(Vector2.new(1, 1), Right, Bottom, 1, CornerLength)
+
+        Items["Corners"] = Corners
+
+        -- health bar
+        Items["HealthBack"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Stage,
+            AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(0.5, -BoxHalfWidth - 6, 0, BoxY),
+            Size = UDim2.new(0, 3, 0, BoxHeight),
+            BorderSizePixel = 0,
+            ZIndex = 4,
+            BackgroundColor3 = Library.Theme["Outline 2"]
+        }):AddToTheme({BackgroundColor3 = "Outline 2"})
+
+        Stroke(Items["HealthBack"].Instance, "Outline 2")
+
+        Items["HealthFill"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["HealthBack"].Instance,
+            AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0, 0, 1, 0),
+            Size = UDim2.new(1, 0, 1, 0),
+            BorderSizePixel = 0,
+            ZIndex = 5,
+            BackgroundColor3 = Color3.fromRGB(80, 255, 100)
+        })
+
+        Items["HealthText"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Library.Font,
+            TextSize = Library.FontSize,
+            Parent = Stage,
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(0.5, -BoxHalfWidth - 10, 0, BoxY),
+            Size = UDim2.new(0, 0, 0, 15),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            TextColor3 = Library.Theme["Text"],
+            TextStrokeTransparency = 0.4,
+            Text = "100",
+            ZIndex = 5,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = "Text"})
+
+        -- text labels
+        local MakeText = function(Y, Anchor, Text, Color)
+            return Library:Create("TextLabel", {
+                Name = "\0",
+                FontFace = Library.Font,
+                TextSize = Library.FontSize,
+                Parent = Stage,
+                AnchorPoint = Anchor,
+                Position = UDim2.new(0.5, 0, 0, Y),
+                Size = UDim2.new(0, 0, 0, 15),
+                BorderSizePixel = 0,
+                BackgroundTransparency = 1,
+                TextColor3 = Color,
+                TextStrokeTransparency = 0.4,
+                Text = Text,
+                ZIndex = 5,
+                AutomaticSize = Enum.AutomaticSize.X
+            })
+        end
+
+        Items["NameText"] = MakeText(BoxY - 4, Vector2.new(0.5, 1), "Player", State.NameColor)
+        Items["DistanceText"] = MakeText(BoxY + BoxHeight + 4, Vector2.new(0.5, 0), "42m", State.DistanceColor)
+        Items["WeaponText"] = MakeText(BoxY + BoxHeight + 19, Vector2.new(0.5, 0), "Rifle", State.WeaponColor)
+
+        Items["Hint"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Library.Font,
+            TextSize = Library.FontSize,
+            Parent = Stage,
+            AnchorPoint = Vector2.new(0.5, 1),
+            Position = UDim2.new(0.5, 0, 1, -3),
+            Size = UDim2.new(0, 0, 0, 15),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            TextColor3 = Library.Theme["Inactive Text"],
+            Text = "drag to rotate - rmb to reset",
+            ZIndex = 5,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = "Inactive Text"})
+    end
+
+    Preview.Items = Items
+
+    local UpdateModel = function()
+        local Rotation = CFrame.Angles(0, Preview.Yaw, 0)
+
+        for _, Entry in Items["Parts"] do
+            Entry.Part.CFrame = Rotation * CFrame.new(Entry.Offset)
+        end
+    end
+
+    local UpdateSkeleton = function()
+        local Cos = math.cos(Preview.Yaw)
+
+        for _, Entry in Items["Skeleton"] do
+            local P = Entry.Points
+
+            local X1, Y1 = P[1] * Cos * K, (StageHeight / 2) - P[2] * K
+            local X2, Y2 = P[3] * Cos * K, (StageHeight / 2) - P[4] * K
+
+            local DX, DY = X2 - X1, Y2 - Y1
+            local Length = math.sqrt(DX * DX + DY * DY)
+
+            local Line = Entry.Line.Instance
+            Line.Size = UDim2.new(0, Length + 1, 0, 1)
+            Line.Position = UDim2.new(0.5, (X1 + X2) / 2, 0, (Y1 + Y2) / 2)
+            Line.Rotation = math.deg(math.atan2(DY, DX))
+        end
+    end
+
+    local HealthColor = function(Pct)
+        return Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(80, 255, 100), math.clamp(Pct, 0, 1))
+    end
+
+    local UpdateHealth = function()
+        local Pct = math.clamp(State.HealthValue, 0, 100) / 100
+
+        Items["HealthBack"].Instance.Visible = State.Health
+        Items["HealthText"].Instance.Visible = State.Health
+
+        Items["HealthFill"].Instance.Size = UDim2.new(1, 0, Pct, 0)
+        Items["HealthFill"].Instance.BackgroundColor3 = HealthColor(Pct)
+
+        Items["HealthText"].Instance.Text = tostring(math.floor(State.HealthValue + 0.5))
+        Items["HealthText"].Instance.Position = UDim2.new(0.5, -BoxHalfWidth - 10, 0, BoxY + BoxHeight * (1 - Pct))
+    end
+
+    local LastBase
+
+    local Refresh = function()
+        local Full = State.Box and State.BoxStyle ~= "Corner"
+        local Corner = State.Box and State.BoxStyle == "Corner"
+
+        Items["FullBox"].Instance.Visible = Full
+        Items["FullBoxStroke"].Instance.Color = State.BoxColor
+        Items["FullBox"].Instance.BackgroundColor3 = State.BoxFillColor
+        Items["FullBox"].Instance.BackgroundTransparency = (State.Box and State.BoxFill) and State.BoxFillAlpha or 1
+
+        for _, Piece in Items["Corners"] do
+            Piece.Instance.Visible = Corner
+            Piece.Instance.BackgroundColor3 = State.BoxColor
+        end
+
+        Items["NameText"].Instance.Visible = State.Name
+        Items["NameText"].Instance.TextColor3 = State.NameColor
+
+        Items["DistanceText"].Instance.Visible = State.Distance
+        Items["DistanceText"].Instance.TextColor3 = State.DistanceColor
+
+        Items["WeaponText"].Instance.Visible = State.Weapon
+        Items["WeaponText"].Instance.TextColor3 = State.WeaponColor
+
+        for _, Entry in Items["Skeleton"] do
+            Entry.Line.Instance.Visible = State.Skeleton
+            Entry.Line.Instance.BackgroundColor3 = State.SkeletonColor
+        end
+
+        LastBase = Library.Theme["Hovered Element"]
+
+        for _, Entry in Items["Parts"] do
+            if State.Chams then
+                Entry.Part.Color = State.ChamsColor
+                Entry.Part.Transparency = State.ChamsAlpha
+            else
+                Entry.Part.Color = Entry.IsNose and Library.Theme.Accent or LastBase
+                Entry.Part.Transparency = 0
+            end
+        end
+
+        UpdateHealth()
+    end
+
+    -- Key: any key in State (see top). Value: bool / color / string / number
+    function Preview:Set(Key, Value)
+        if State[Key] == nil then
+            return
+        end
+
+        if type(Value) == "table" and Value.Color then
+            Value = Value.Color
+        end
+
+        if State[Key] == Value then
+            return
+        end
+
+        State[Key] = Value
+
+        if Key == "HealthValue" then
+            UpdateHealth()
+        else
+            Refresh()
+        end
+    end
+
+    function Preview:SetMany(Settings)
+        for Key, Value in Settings do
+            Preview:Set(Key, Value)
+        end
+    end
+
+    function Preview:SetYaw(Radians)
+        Preview.Yaw = Radians % (math.pi * 2)
+        UpdateModel()
+        UpdateSkeleton()
+    end
+
+    function Preview:SetName(Text)
+        Items["NameText"].Instance.Text = tostring(Text)
+    end
+
+    function Preview:SetDistance(Text)
+        Items["DistanceText"].Instance.Text = tostring(Text)
+    end
+
+    function Preview:SetWeapon(Text)
+        Items["WeaponText"].Instance.Text = tostring(Text)
+    end
+
+    function Preview:SetText(Text)
+        Items["Title"].Instance.Text = tostring(Text)
+    end
+
+    -- Map preview keys to Library flags. The preview follows them live.
+    -- Preview:Bind({Box = "ESPBox", BoxColor = "ESPBoxColor", BoxStyle = "ESPBoxStyle", ...})
+    function Preview:Bind(Map)
+        Preview.Binds = Map
+    end
+
+    function Preview:Unbind()
+        Preview.Binds = nil
+    end
+
+    -- puts the preview on the right side of the gui (falls back to the left if there is no room)
+    function Preview:Dock()
+        local Win = Library.CurrentWindow
+        local Main = Win and Win.Items and Win.Items["MainFrame"] and Win.Items["MainFrame"].Instance
+
+        if not Main then
+            return
+        end
+
+        local Frame = Items["Preview"].Instance
+        local Gap = 10
+        local ScreenWidth = Library.Holder.Instance.AbsoluteSize.X
+
+        local X = Main.AbsolutePosition.X + Main.AbsoluteSize.X + Gap
+
+        if X + Frame.AbsoluteSize.X > ScreenWidth - 8 then
+            X = Main.AbsolutePosition.X - Gap - Frame.AbsoluteSize.X
+        end
+
+        X = math.clamp(X, 8, math.max(ScreenWidth - Frame.AbsoluteSize.X - 8, 8))
+
+        Frame.AnchorPoint = Vector2.new(0, 0)
+        Frame.Position = UDim2.new(0, X, 0, Main.AbsolutePosition.Y + GuiInset)
+    end
+
+    function Preview:Open()
+        if not Library.ESPPreviewEnabled then
+            return
+        end
+
+        Preview:Dock()
+        Preview.Shown = true
+        Items["Preview"]:FadeDescendants(true)
+    end
+
+    function Preview:Close()
+        Preview.Shown = false
+        Items["Preview"]:FadeDescendants(false)
+    end
+
+    function Preview:Destroy()
+        Preview.Binds = nil
+        Preview.Animate = false
+        Items["Preview"].Instance:Destroy()
+
+        if Library.ESPPreviewObject == Preview then
+            Library.ESPPreviewObject = nil
+        end
+    end
+
+    -- rotating: left mouse / touch drag turns the dummy, right mouse resets it
+    local Dragging = false
+    local LastX = 0
+
+    Items["Rotate"]:Connect("InputBegan", function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+            Dragging = true
+            LastX = Input.Position.X
+        elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
+            Preview:SetYaw(0)
+        end
+    end)
+
+    Library:Connect(UserInputService.InputChanged, function(Input)
+        if not Dragging then
+            return
+        end
+
+        if Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch then
+            local Delta = Input.Position.X - LastX
+            LastX = Input.Position.X
+
+            Preview:SetYaw(Preview.Yaw + math.rad(Delta * 1.2))
+        end
+    end)
+
+    Library:Connect(UserInputService.InputEnded, function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+            Dragging = false
+        end
+    end)
+
+    Library:Connect(RunService.RenderStepped, function()
+        if not Preview.Shown then
+            return
+        end
+
+        local Binds = Preview.Binds
+
+        if Binds then
+            for Key, Flag in Binds do
+                local Value = Library.Flags[Flag]
+
+                if Value ~= nil then
+                    if type(Value) == "table" and Value.Color then
+                        Value = Value.Color
+                    elseif type(Value) == "table" and Value.Toggled ~= nil then
+                        Value = Value.Toggled
+                    elseif type(Value) == "table" then
+                        Value = nil
+                    end
+
+                    if Value ~= nil then
+                        Preview:Set(Key, Value)
+                    end
+                end
+            end
+        end
+
+        -- follow theme changes
+        if LastBase ~= Library.Theme["Hovered Element"] then
+            Refresh()
+        end
+
+        -- gentle health animation unless the health value is bound to a flag
+        if Preview.Animate and not (Binds and Binds.HealthValue) then
+            Preview:Set("HealthValue", 70 + math.sin(os.clock() * 1.2) * 30)
+        end
+    end)
+
+    Refresh()
+    UpdateModel()
+    UpdateSkeleton()
+
+    Library.ESPPreviewObject = Preview
+
+    local Win = Library.CurrentWindow
+
+    if Library.ESPPreviewEnabled and Win and Win.IsOpen then
+        Preview:Open()
+    end
+
+    return setmetatable(Preview, Library)
+end
+
+--[[ example usage (after the library + window are created):
+
+local ESP = Page:SubPage({Name = "ESP"}):Section({Name = "players", Side = 1})
+
+ESP:Toggle({Name = "Box", Flag = "ESPBox", Default = true}):Colorpicker({Flag = "ESPBoxColor", Default = Color3.fromRGB(133, 135, 255)})
+ESP:Dropdown({Name = "Box Style", Flag = "ESPBoxStyle", Items = {"Full", "Corner"}, Default = "Full"})
+ESP:Toggle({Name = "Box Fill", Flag = "ESPBoxFill"}):Colorpicker({Flag = "ESPBoxFillColor", Default = Color3.fromRGB(133, 135, 255)})
+ESP:Toggle({Name = "Name", Flag = "ESPName", Default = true}):Colorpicker({Flag = "ESPNameColor", Default = Color3.fromRGB(255, 255, 255)})
+ESP:Toggle({Name = "Health Bar", Flag = "ESPHealth", Default = true})
+ESP:Toggle({Name = "Distance", Flag = "ESPDistance", Default = true})
+ESP:Toggle({Name = "Weapon", Flag = "ESPWeapon", Default = true})
+ESP:Toggle({Name = "Skeleton", Flag = "ESPSkeleton"}):Colorpicker({Flag = "ESPSkeletonColor", Default = Color3.fromRGB(255, 255, 255)})
+ESP:Toggle({Name = "Chams", Flag = "ESPChams"}):Colorpicker({Flag = "ESPChamsColor", Default = Color3.fromRGB(133, 135, 255)})
+
+-- the preview is created by the settings toggle; bind it once it exists
+Library.ESPPreviewObject:Bind({
+    Box = "ESPBox", BoxColor = "ESPBoxColor", BoxStyle = "ESPBoxStyle",
+    BoxFill = "ESPBoxFill", BoxFillColor = "ESPBoxFillColor",
+    Name = "ESPName", NameColor = "ESPNameColor",
+    Health = "ESPHealth", Distance = "ESPDistance", Weapon = "ESPWeapon",
+    Skeleton = "ESPSkeleton", SkeletonColor = "ESPSkeletonColor",
+    Chams = "ESPChams", ChamsColor = "ESPChamsColor",
+})
+
+]]
