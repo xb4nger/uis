@@ -2916,7 +2916,7 @@ end
 Items["Title"] = Library:Create("TextLabel", {
     Name = "\0",
     FontFace = Font.fromEnum(Enum.Font.GothamBlack),
-    TextSize = 38,
+    TextSize = 36.5,
     Parent = Items["MainFrame"].Instance,
     TextWrapped = false,
     TextColor3 = Library.Theme["Text"],
