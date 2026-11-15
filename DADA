@@ -1,0 +1,190 @@
+Library.Watermark = function(Self, Params)
+    Params = Params or { }
+
+    local Watermark = {
+        Name = Params.Name or Params.name or "Watermark",
+        SubName = Params.SubName or Params.subname or "for diddy",
+
+        Items = { },
+        Fps = 60,
+        Ping = 0,
+        BindCallback = nil,
+        BindInterval = 0.25
+    }
+
+    local Items = { } do
+        Items["Watermark"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Library.Holder.Instance,
+            AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(1, -10, 0, 10),
+            Size = UDim2.new(0, 0, 0, 25),
+            BorderSizePixel = 0,
+            AutomaticSize = Enum.AutomaticSize.X,
+            BackgroundColor3 = Library.Theme["Inline"]
+        }):AddToTheme({BackgroundColor3 = 'Inline'})
+
+        Items["Watermark"]:MakeDraggable()
+
+        Library:Create("UIStroke", {
+            Name = "\0",
+            Parent = Items["Watermark"].Instance,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            LineJoinMode = Enum.LineJoinMode.Miter,
+            Color = Library.Theme["Outline"]
+        }):AddToTheme({Color = 'Outline'})
+
+        Library:Create("UIStroke", {
+            Name = "\0",
+            Parent = Items["Watermark"].Instance,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            LineJoinMode = Enum.LineJoinMode.Miter,
+            Color = Library.Theme["Outline 2"],
+            BorderOffset = UDim.new(0, 1)
+        }):AddToTheme({Color = 'Outline 2'})
+
+        Library:Create("UIListLayout", {
+            Name = "\0",
+            Parent = Items["Watermark"].Instance,
+            VerticalAlignment = Enum.VerticalAlignment.Center,
+            FillDirection = Enum.FillDirection.Horizontal,
+            Padding = UDim.new(0, 6),
+            SortOrder = Enum.SortOrder.LayoutOrder
+        })
+
+        Library:Create("UIPadding", {
+            Name = "\0",
+            Parent = Items["Watermark"].Instance,
+            PaddingTop = UDim.new(0, 6),
+            PaddingBottom = UDim.new(0, 6),
+            PaddingRight = UDim.new(0, 6),
+            PaddingLeft = UDim.new(0, 6)
+        })
+
+        Items["Text"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Font.fromEnum(Enum.Font.GothamBlack),
+            TextSize = 20,
+            Parent = Items["Watermark"].Instance,
+            TextColor3 = Library.Theme["Text"],
+            Text = Watermark.Name,
+            Size = UDim2.new(0, 0, 0, 15),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            Position = UDim2.new(0, -2, 0, 0),
+            TextWrapped = false,                       -- was true, this broke resizing
+            TextXAlignment = Enum.TextXAlignment.Left,
+            RichText = true,
+            LayoutOrder = 1,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = 'Text'})
+
+        Items["SubText"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Library.Font,
+            TextSize = Library.FontSize,
+            Parent = Items["Watermark"].Instance,
+            TextColor3 = Library.Theme["Text"],
+            Text = Watermark.SubName,
+            Size = UDim2.new(0, 0, 0, 15),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            Position = UDim2.new(0, -2, 0, 0),
+            TextWrapped = false,                       -- was true, this broke resizing
+            TextXAlignment = Enum.TextXAlignment.Left,
+            RichText = true,
+            LayoutOrder = 2,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = 'Text'})
+
+        Watermark.Items = Items
+    end
+
+    function Watermark:SetVisibility(Bool)
+        Items["Watermark"].Instance.Visible = Bool
+    end
+
+    function Watermark:SetText(Text)
+        Text = tostring(Text)
+
+        if Items["Text"].Instance.Text ~= Text then
+            Items["Text"].Instance.Text = Text
+        end
+    end
+
+    function Watermark:SetSubText(Text)
+        Text = tostring(Text)
+
+        if Items["SubText"].Instance.Text ~= Text then
+            Items["SubText"].Instance.Text = Text
+        end
+    end
+
+    -- set both at once
+    function Watermark:Update(Name, SubName)
+        if Name ~= nil then
+            Watermark:SetText(Name)
+        end
+
+        if SubName ~= nil then
+            Watermark:SetSubText(SubName)
+        end
+    end
+
+    -- Callback(Fps, Ping) -> string, shown as the subtext every Interval seconds
+    function Watermark:Bind(Callback, Interval)
+        Watermark.BindCallback = Callback
+        Watermark.BindInterval = Interval or 0.25
+    end
+
+    function Watermark:Unbind()
+        Watermark.BindCallback = nil
+    end
+
+    function Watermark:Center()
+        local AbsPos = Items["Watermark"].Instance.AbsolutePosition
+        task.wait()
+        Items["Watermark"].Instance.AnchorPoint = Vector2.new(0, 0)
+        Items["Watermark"].Instance.Position = UDim2.new(0, AbsPos.X, 0, AbsPos.Y + GuiInset)
+    end
+
+    Watermark:Center()
+
+    -- fps / ping tracking + bound text updates
+    do
+        local Stats = game:GetService("Stats")
+        local Frames, Elapsed, SinceUpdate = 0, 0, 0
+
+        Library:Connect(RunService.RenderStepped, function(Delta)
+            Frames += 1
+            Elapsed += Delta
+            SinceUpdate += Delta
+
+            if Elapsed >= 0.5 then
+                Watermark.Fps = math.floor(Frames / Elapsed + 0.5)
+                Frames, Elapsed = 0, 0
+            end
+
+            if Watermark.BindCallback and SinceUpdate >= Watermark.BindInterval then
+                SinceUpdate = 0
+
+                local Ok, Ping = pcall(function()
+                    return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
+                end)
+
+                Watermark.Ping = Ok and math.floor(Ping + 0.5) or 0
+
+                local Success, Result = pcall(Watermark.BindCallback, Watermark.Fps, Watermark.Ping)
+
+                if Success and Result ~= nil then
+                    Watermark:SetSubText(Result)
+                end
+            end
+        end)
+    end
+
+    Library.WatermarkObject = Watermark
+    Self.WatermarkObject = Watermark
+
+    return setmetatable(Watermark, Library)
+end
