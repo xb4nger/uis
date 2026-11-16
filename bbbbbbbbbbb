@@ -1,0 +1,1169 @@
+-- Drop-in replacement for Library.ESPPreview (leave Library.SetESPPreview as it is).
+-- Same structure as before (State table, Set / SetMany / Bind, live pose mirroring, skeleton, chams),
+-- with the Atlanta look ported in:
+--   * outlined full box (black outer + colored line + black inner)
+--   * outlined corner box (each corner piece has a black border around the colored line)
+--   * black-bordered health bar that lerps HealthLow -> HealthHigh, optional animated health
+--   * "DisplayName (@Name)", "123st" and "[ Tool ]" text formats, solid text outline
+--   * optional auto rotate
+--
+-- New State keys (all work with Preview:Set / SetMany / Bind):
+--   BoxOutline    bool   (default true)   black borders on the box
+--   HealthLow     Color3 (default red)    color of the bar when empty
+--   HealthHigh    Color3 (default green)  color of the bar when full
+--   AnimateHealth bool   (default false)  sine wave health like Atlanta's preview
+--   AutoRotate    bool   (default false)  spin the model on its own
+--   RotateSpeed   number (default 30)     degrees per second
+
+Library.ESPPreview = function(Self, Params)
+    Params = Params or { }
+
+    if Library.ESPPreviewEnabled == nil then
+        Library.ESPPreviewEnabled = true
+    end
+
+    local Preview = {
+        Name = Params.Name or Params.name or "ESP Preview",
+        Target = Params.Target or Params.target,
+        Yaw = 0,
+        Pitch = 0,
+        KeepHumanoid = Params.KeepHumanoid ~= false, -- keeps the real clothes; auto-switches off if the preview fails
+        Binds = nil,
+        Shown = false,
+        Dirty = true,
+        Overrides = { },
+        Items = { }
+    }
+
+    -- everything the preview can show; change with Preview:Set(Key, Value). all off by default
+    local State = {
+        Box = false,
+        BoxStyle = "Full",              -- "Full" | "Corner"
+        BoxColor = Library.Theme.Accent,
+        BoxOutline = true,              -- black borders around the box
+        BoxFill = false,
+        BoxFillColor = Library.Theme.Accent,
+        BoxFillAlpha = 0.85,            -- transparency of the fill
+
+        Name = false,
+        NameColor = Library.Theme.Text,
+
+        Health = false,
+        HealthValue = 100,
+        HealthLow = Color3.fromRGB(255, 60, 60),
+        HealthHigh = Color3.fromRGB(80, 255, 100),
+        AnimateHealth = false,          -- ignores the real health and plays a sine wave instead
+
+        Distance = false,
+        DistanceColor = Library.Theme["Inactive Text"],
+
+        Weapon = false,
+        WeaponColor = Library.Theme["Inactive Text"],
+
+        Skeleton = false,
+        SkeletonColor = Color3.fromRGB(255, 255, 255),
+
+        Chams = false,
+        ChamsColor = Library.Theme.Accent,
+        ChamsAlpha = 0.5,               -- transparency of the chams
+
+        AutoRotate = false,
+        RotateSpeed = 30,               -- degrees per second
+    }
+
+    local StageWidth, StageHeight = 204, 250
+    local StageY = 26
+    local BoxY, BoxHeight, BoxHalfWidth = 52, 150, 48
+    local Black = Color3.fromRGB(0, 0, 0)
+
+    -- model state
+    local Clone, Source, SourcePlayer = nil, nil, nil
+    local SourceCount, LastBuild = 0, 0
+    local Originals = { }
+    local Center = Vector3.zero
+    local Pairs, RefPart, CloneRef = { }, nil, nil -- live pose mirroring: {Clone = part, Source = part}
+    local ScaleK, TargetY = 10, 0 -- pixels per stud, and the height the camera looks at
+    local CamX, CamY, CamDistance = 0, 0, 20 -- how far the real model is from where it should be (camera follows it)
+
+    local Items = { } do
+        Items["Preview"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Library.Holder.Instance,
+            AnchorPoint = Vector2.new(0, 0),
+            Position = UDim2.new(1, -240, 0.5, -142),
+            Size = UDim2.new(0, 220, 0, StageY + StageHeight + 8),
+            BorderSizePixel = 0,
+            Visible = false,
+            BackgroundColor3 = Library.Theme["Inline"]
+        }):AddToTheme({BackgroundColor3 = "Inline"})
+
+        Items["Preview"]:MakeDraggable()
+
+        if IsMobile then
+            Library:Create("UIScale", {
+                Name = "\0",
+                Parent = Items["Preview"].Instance,
+                Scale = 0.75
+            })
+        end
+
+        Items["UIStroke"] = Stroke(Items["Preview"].Instance, "Outline")
+
+        Library:Create("UIGradient", {
+            Name = "\0",
+            Parent = Items["UIStroke"].Instance,
+            Rotation = 90,
+            Transparency = NumberSequence.new{
+                NumberSequenceKeypoint.new(0, 0),
+                NumberSequenceKeypoint.new(1, 0.637499988079071)
+            }
+        })
+
+        Stroke(Items["Preview"].Instance, "Outline 2", 1)
+
+        Items["Title"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Library.BoldFont,
+            TextSize = Library.FontSize,
+            Parent = Items["Preview"].Instance,
+            TextColor3 = Library.Theme["Text"],
+            Text = Preview.Name,
+            Size = UDim2.new(0, 0, 0, 15),
+            Position = UDim2.new(0, 10, 0, 5),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = "Text"})
+
+        Items["Stage"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["Preview"].Instance,
+            Position = UDim2.new(0, 8, 0, StageY),
+            Size = UDim2.new(0, StageWidth, 0, StageHeight),
+            BorderSizePixel = 0,
+            ClipsDescendants = true,
+            BackgroundColor3 = Library.Theme["Background"]
+        }):AddToTheme({BackgroundColor3 = "Background"})
+
+        Stroke(Items["Stage"].Instance, "Outline")
+        Stroke(Items["Stage"].Instance, "Outline 2", 1)
+
+        local Stage = Items["Stage"].Instance
+
+        -- viewport that shows the cloned character
+        Items["Viewport"] = Library:Create("ViewportFrame", {
+            Name = "\0",
+            Parent = Stage,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            Ambient = Color3.fromRGB(175, 175, 175),
+            LightColor = Color3.fromRGB(255, 255, 255),
+            LightDirection = Vector3.new(-0.5, -1, -0.8),
+            ZIndex = 1
+        })
+
+        local ViewportCamera = Instance.new("Camera")
+        ViewportCamera.FieldOfView = 10
+        ViewportCamera.Parent = Items["Viewport"].Instance
+        Items["Viewport"].Instance.CurrentCamera = ViewportCamera
+        Items["Camera"] = ViewportCamera
+
+        -- drag area for rotating (sits under the esp elements, above the viewport)
+        Items["Rotate"] = Library:Create("TextButton", {
+            Name = "\0",
+            Parent = Stage,
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ZIndex = 2
+        })
+
+        -- skeleton lines; each one is linked to two body parts when a model is built
+        Items["Skeleton"] = { }
+
+        for _ = 1, 17 do
+            local Line = Library:Create("Frame", {
+                Name = "\0",
+                Parent = Stage,
+                AnchorPoint = Vector2.new(0.5, 0.5),
+                Size = UDim2.new(0, 2, 0, 1),
+                BorderSizePixel = 0,
+                Visible = false,
+                ZIndex = 3,
+                BackgroundColor3 = State.SkeletonColor
+            })
+
+            table.insert(Items["Skeleton"], {Line = Line, A = nil, B = nil})
+        end
+
+        -- full box: colored line (the stroke) with a black line outside and inside of it
+        Items["FullBox"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Stage,
+            AnchorPoint = Vector2.new(0.5, 0),
+            Position = UDim2.new(0.5, 0, 0, BoxY),
+            Size = UDim2.new(0, BoxHalfWidth * 2, 0, BoxHeight),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            Visible = false,
+            ZIndex = 4,
+            BackgroundColor3 = State.BoxFillColor
+        })
+
+        Items["FullBoxStroke"] = Library:Create("UIStroke", {
+            Name = "\0",
+            Parent = Items["FullBox"].Instance,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            LineJoinMode = Enum.LineJoinMode.Miter,
+            Color = State.BoxColor
+        })
+
+        Items["BoxOuter"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["FullBox"].Instance,
+            Position = UDim2.new(0, -1, 0, -1),
+            Size = UDim2.new(1, 2, 1, 2),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            ZIndex = 4
+        })
+
+        Library:Create("UIStroke", {
+            Name = "\0",
+            Parent = Items["BoxOuter"].Instance,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            LineJoinMode = Enum.LineJoinMode.Miter,
+            Color = Black
+        })
+
+        Items["BoxInner"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["FullBox"].Instance,
+            Position = UDim2.new(0, 1, 0, 1),
+            Size = UDim2.new(1, -2, 1, -2),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            ZIndex = 4
+        })
+
+        Library:Create("UIStroke", {
+            Name = "\0",
+            Parent = Items["BoxInner"].Instance,
+            ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+            LineJoinMode = Enum.LineJoinMode.Miter,
+            Color = Black
+        })
+
+        -- corner box: 8 pieces, each a black 3px bar with the colored 1px line inside it.
+        -- the colored lines sit on the same pixels as the full box line, so switching styles doesn't shift anything
+        local Corners = { }
+        local CornerLength = 14
+
+        local MakeCorner = function(AnchorX, AnchorY, X, Y, W, H)
+            local Piece = Library:Create("Frame", {
+                Name = "\0",
+                Parent = Stage,
+                AnchorPoint = Vector2.new(AnchorX, AnchorY),
+                Position = UDim2.new(0.5, X, 0, Y),
+                Size = UDim2.new(0, W, 0, H),
+                BorderSizePixel = 0,
+                Visible = false,
+                ZIndex = 4,
+                BackgroundColor3 = Black
+            })
+
+            -- colored line is above every black piece so the corners join cleanly
+            local Line = Library:Create("Frame", {
+                Name = "\0",
+                Parent = Piece.Instance,
+                Position = UDim2.new(0, 1, 0, 1),
+                Size = UDim2.new(1, -2, 1, -2),
+                BorderSizePixel = 0,
+                ZIndex = 5,
+                BackgroundColor3 = State.BoxColor
+            })
+
+            table.insert(Corners, {Piece = Piece, Line = Line})
+        end
+
+        local Left, Right = -BoxHalfWidth - 2, BoxHalfWidth + 2
+        local Top, Bottom = BoxY - 2, BoxY + BoxHeight + 2
+
+        MakeCorner(0, 0, Left, Top, CornerLength, 3)
+        MakeCorner(0, 0, Left, Top, 3, CornerLength)
+        MakeCorner(1, 0, Right, Top, CornerLength, 3)
+        MakeCorner(1, 0, Right, Top, 3, CornerLength)
+        MakeCorner(0, 1, Left, Bottom, CornerLength, 3)
+        MakeCorner(0, 1, Left, Bottom, 3, CornerLength)
+        MakeCorner(1, 1, Right, Bottom, CornerLength, 3)
+        MakeCorner(1, 1, Right, Bottom, 3, CornerLength)
+
+        Items["Corners"] = Corners
+
+        -- health bar: black frame with a 1px border, fill lerps HealthLow -> HealthHigh
+        Items["HealthBack"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Stage,
+            AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(0.5, -BoxHalfWidth - 4, 0, BoxY - 2),
+            Size = UDim2.new(0, 4, 0, BoxHeight + 4),
+            BorderSizePixel = 0,
+            Visible = false,
+            ZIndex = 4,
+            BackgroundColor3 = Black
+        })
+
+        Items["HealthFill"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Items["HealthBack"].Instance,
+            AnchorPoint = Vector2.new(0, 1),
+            Position = UDim2.new(0, 1, 1, -1),
+            Size = UDim2.new(1, -2, 0, BoxHeight + 2),
+            BorderSizePixel = 0,
+            ZIndex = 5,
+            BackgroundColor3 = State.HealthHigh
+        })
+
+        Items["HealthText"] = Library:Create("TextLabel", {
+            Name = "\0",
+            FontFace = Library.Font,
+            TextSize = Library.FontSize,
+            Parent = Stage,
+            AnchorPoint = Vector2.new(1, 0.5),
+            Position = UDim2.new(0.5, -BoxHalfWidth - 9, 0, BoxY),
+            Size = UDim2.new(0, 0, 0, 15),
+            BorderSizePixel = 0,
+            BackgroundTransparency = 1,
+            TextColor3 = Library.Theme["Text"],
+            TextStrokeTransparency = 0,
+            Text = "100",
+            Visible = false,
+            ZIndex = 5,
+            AutomaticSize = Enum.AutomaticSize.X
+        }):AddToTheme({TextColor3 = "Text"})
+
+        -- text labels (filled from the shown player)
+        local MakeText = function(Y, Anchor, Color)
+            return Library:Create("TextLabel", {
+                Name = "\0",
+                FontFace = Library.Font,
+                TextSize = Library.FontSize,
+                Parent = Stage,
+                AnchorPoint = Anchor,
+                Position = UDim2.new(0.5, 0, 0, Y),
+                Size = UDim2.new(0, 0, 0, 15),
+                BorderSizePixel = 0,
+                BackgroundTransparency = 1,
+                TextColor3 = Color,
+                TextStrokeTransparency = 0,
+                Text = "",
+                Visible = false,
+                ZIndex = 5,
+                AutomaticSize = Enum.AutomaticSize.X
+            })
+        end
+
+        Items["NameText"] = MakeText(BoxY - 5, Vector2.new(0.5, 1), State.NameColor)
+        Items["DistanceText"] = MakeText(BoxY + BoxHeight + 5, Vector2.new(0.5, 0), State.DistanceColor)
+        Items["WeaponText"] = MakeText(BoxY + BoxHeight + 19, Vector2.new(0.5, 0), State.WeaponColor)
+
+        -- accent line = top bar of the preview box (parented to the stage so it sits on top of it)
+        Items["Liner"] = Library:Create("Frame", {
+            Name = "\0",
+            Parent = Stage,
+            Position = UDim2.new(0, 0, 0, 0),
+            Size = UDim2.new(1, 0, 0, 2),
+            BorderSizePixel = 0,
+            ZIndex = 6,
+            BackgroundColor3 = Library.Theme["Accent"]
+        }):AddToTheme({BackgroundColor3 = "Accent"})
+    end
+
+    Preview.Items = Items
+
+    -- skeleton links: pairs of part names (first match wins, so R15 and R6 both work)
+    local Chains = {
+        {{"Head"}, {"UpperTorso", "Torso"}},
+        {{"UpperTorso"}, {"LowerTorso"}},
+
+        {{"UpperTorso", "Torso"}, {"LeftUpperArm", "Left Arm"}},
+        {{"LeftUpperArm"}, {"LeftLowerArm"}},
+        {{"LeftLowerArm"}, {"LeftHand"}},
+
+        {{"UpperTorso", "Torso"}, {"RightUpperArm", "Right Arm"}},
+        {{"RightUpperArm"}, {"RightLowerArm"}},
+        {{"RightLowerArm"}, {"RightHand"}},
+
+        {{"LowerTorso", "Torso"}, {"LeftUpperLeg", "Left Leg"}},
+        {{"LeftUpperLeg"}, {"LeftLowerLeg"}},
+        {{"LeftLowerLeg"}, {"LeftFoot"}},
+
+        {{"LowerTorso", "Torso"}, {"RightUpperLeg", "Right Leg"}},
+        {{"RightUpperLeg"}, {"RightLowerLeg"}},
+        {{"RightLowerLeg"}, {"RightFoot"}},
+    }
+
+    -- only the real body parts are used to measure / centre the model (ignores stray parts, tools, accessories)
+    local BodyNames = { }
+
+    for _, Name in {
+        "Head", "UpperTorso", "LowerTorso", "Torso",
+        "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand",
+        "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot",
+        "Left Arm", "Right Arm", "Left Leg", "Right Leg"
+    } do
+        BodyNames[Name] = true
+    end
+
+    local UpdateSkeleton = function()
+        for _, Link in Items["Skeleton"] do
+            local Line = Link.Line.Instance
+
+            if State.Skeleton and Link.A and Link.B and Link.A.Parent and Link.B.Parent then
+                local A, B = Link.A.Position, Link.B.Position
+
+                local X1, Y1 = StageWidth / 2 + (A.X - CamX) * ScaleK, StageHeight / 2 - (A.Y - TargetY - CamY) * ScaleK
+                local X2, Y2 = StageWidth / 2 + (B.X - CamX) * ScaleK, StageHeight / 2 - (B.Y - TargetY - CamY) * ScaleK
+
+                local DX, DY = X2 - X1, Y2 - Y1
+                local Length = math.sqrt(DX * DX + DY * DY)
+
+                Line.Size = UDim2.new(0, Length + 1, 0, 1)
+                Line.Position = UDim2.new(0, (X1 + X2) / 2, 0, (Y1 + Y2) / 2)
+                Line.Rotation = math.deg(math.atan2(DY, DX))
+                Line.Visible = true
+            else
+                Line.Visible = false
+            end
+        end
+    end
+
+    local ApplyChams = function()
+        for Part, Original in Originals do
+            if not Part.Parent then
+                continue
+            end
+
+            if State.Chams and Original.Transparency < 1 then
+                Part.Color = State.ChamsColor
+                Part.Transparency = State.ChamsAlpha
+                Part.Material = Enum.Material.SmoothPlastic
+            else
+                Part.Color = Original.Color
+                Part.Transparency = Original.Transparency
+                Part.Material = Original.Material
+            end
+        end
+    end
+
+    -- bounds (true part corners) of the body in the root's space, rotated by Rot
+    local Measure = function(Rot, Rels)
+        local Min, Max
+
+        for Index, Pair in Pairs do
+            local Rel = Rels[Index]
+
+            if Pair.Body and Rel then
+                local Half = Pair.Source.Size / 2
+
+                for X = -1, 1, 2 do
+                    for Y = -1, 1, 2 do
+                        for Z = -1, 1, 2 do
+                            local Point = Rot * (Rel * Vector3.new(Half.X * X, Half.Y * Y, Half.Z * Z))
+
+                            if Min then
+                                Min = Vector3.new(math.min(Min.X, Point.X), math.min(Min.Y, Point.Y), math.min(Min.Z, Point.Z))
+                                Max = Vector3.new(math.max(Max.X, Point.X), math.max(Max.Y, Point.Y), math.max(Max.Z, Point.Z))
+                            else
+                                Min, Max = Point, Point
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        return Min, Max
+    end
+
+    local GetRels = function()
+        local Rels = { }
+        local RefCFrame = RefPart.CFrame
+
+        for Index, Pair in Pairs do
+            if Pair.Source.Parent then
+                Rels[Index] = RefCFrame:ToObjectSpace(Pair.Source.CFrame)
+            end
+        end
+
+        return Rels
+    end
+
+    -- the model faces -Z by default and the camera looks down -Z, so turn it around by pi.
+    -- every part copies the real character's live position (relative to its root), so the real animation plays
+    local ApplyPose = function()
+        if not Clone then
+            return
+        end
+
+        local Rot = CFrame.Angles(Preview.Pitch, 0, 0) * CFrame.Angles(0, math.pi + Preview.Yaw, 0)
+
+        if RefPart and RefPart.Parent then
+            local Rels = GetRels()
+            local Min, Max = Measure(Rot, Rels)
+
+            -- always keep the middle of the body on the middle of the preview (no matter the animation / rotation)
+            local Mid = (Min and Max) and (Min + Max) / 2 or (Rot * Center)
+            local Base = CFrame.new(-Mid) * Rot
+
+            for Index, Rel in Rels do
+                Pairs[Index].Clone.CFrame = Base * Rel
+            end
+
+            -- if anything moved the model away from where it was put, the camera follows the real position
+            if CloneRef and CloneRef.Parent then
+                local Off = CloneRef.Position - Base.Position
+
+                if Off.Magnitude > 0.05 and Off.Magnitude < 1000 then
+                    CamX, CamY = Off.X, Off.Y
+                else
+                    CamX, CamY = 0, 0
+                end
+            else
+                CamX, CamY = 0, 0
+            end
+
+            Items["Camera"].CFrame = CFrame.lookAt(
+                Vector3.new(CamX, TargetY + CamY, CamDistance),
+                Vector3.new(CamX, TargetY + CamY, 0)
+            )
+        else
+            Clone:PivotTo(Rot * CFrame.new(-Center))
+        end
+
+        UpdateSkeleton()
+    end
+
+    -- scales the camera so the model's height matches the esp box
+    local FitCamera = function(Height)
+        if Height <= 0.5 then
+            Height = 5
+        end
+
+        ScaleK = BoxHeight / Height
+        TargetY = (BoxY + BoxHeight / 2 - StageHeight / 2) / ScaleK
+
+        local VisibleStuds = StageHeight / ScaleK
+        local Distance = (VisibleStuds / 2) / math.tan(math.rad(10 / 2))
+
+        CamX, CamY, CamDistance = 0, 0, Distance
+
+        Items["Camera"].CFrame = CFrame.lookAt(Vector3.new(0, TargetY, Distance), Vector3.new(0, TargetY, 0))
+    end
+
+    local ClearModel = function()
+        if Clone then
+            Clone:Destroy()
+            Clone = nil
+        end
+
+        Originals = { }
+        Pairs, RefPart, CloneRef = { }, nil, nil
+
+        for _, Link in Items["Skeleton"] do
+            Link.A, Link.B = nil, nil
+        end
+
+        UpdateSkeleton()
+    end
+
+    local UpdateHealth = function()
+        local Pct = math.clamp(State.HealthValue, 0, 100) / 100
+        local FillHeight = math.floor((BoxHeight + 2) * Pct + 0.5)
+
+        Items["HealthBack"].Instance.Visible = State.Health
+        Items["HealthText"].Instance.Visible = State.Health
+
+        Items["HealthFill"].Instance.Size = UDim2.new(1, -2, 0, FillHeight)
+        Items["HealthFill"].Instance.BackgroundColor3 = State.HealthLow:Lerp(State.HealthHigh, Pct)
+
+        -- the number follows the top of the fill
+        Items["HealthText"].Instance.Text = tostring(math.floor(State.HealthValue + 0.5))
+        Items["HealthText"].Instance.Position = UDim2.new(0.5, -BoxHalfWidth - 9, 0, BoxY - 1 + (BoxHeight + 2) - FillHeight)
+    end
+
+    local SetLabel = function(Label, Text)
+        if Label.Instance.Text ~= Text then
+            Label.Instance.Text = Text
+        end
+    end
+
+    -- name / health / distance / tool of the player that is shown
+    local UpdateInfo = function()
+        local Name, Distance, Weapon, Health = "No player found", "", "", 100
+
+        if Source and Source.Parent then
+            if SourcePlayer then
+                Name = string.format("%s (@%s)", SourcePlayer.DisplayName, SourcePlayer.Name)
+            else
+                Name = Source.Name
+            end
+
+            local Humanoid = Source:FindFirstChildOfClass("Humanoid")
+
+            if Humanoid and Humanoid.MaxHealth > 0 then
+                Health = Humanoid.Health / Humanoid.MaxHealth * 100
+            end
+
+            local Tool = Source:FindFirstChildOfClass("Tool")
+            Weapon = "[ " .. (Tool and Tool.Name or "None") .. " ]"
+
+            local Root = Source:FindFirstChild("HumanoidRootPart")
+            local LocalCharacter = LocalPlayer.Character
+            local LocalRoot = LocalCharacter and LocalCharacter:FindFirstChild("HumanoidRootPart")
+
+            if Root and LocalRoot and Root ~= LocalRoot then
+                Distance = math.floor((Root.Position - LocalRoot.Position).Magnitude + 0.5) .. "st"
+            else
+                Distance = "0st"
+            end
+        end
+
+        SetLabel(Items["NameText"], Preview.Overrides.Name or Name)
+        SetLabel(Items["DistanceText"], Preview.Overrides.Distance or Distance)
+        SetLabel(Items["WeaponText"], Preview.Overrides.Weapon or Weapon)
+
+        if not State.AnimateHealth and not (Preview.Binds and Preview.Binds.HealthValue) then
+            Preview:Set("HealthValue", Health)
+        end
+    end
+
+    local FindPart = function(Names)
+        for _, PartName in Names do
+            local Part = Clone:FindFirstChild(PartName, true)
+
+            if Part and Part:IsA("BasePart") then
+                return Part
+            end
+        end
+    end
+
+    local Junk = {"LuaSourceContainer", "Sound", "BillboardGui", "Highlight", "ForceField", "Animator"}
+
+    local Build = function(NewSource, NewPlayer)
+        ClearModel()
+
+        Source, SourcePlayer = NewSource, NewPlayer
+        LastBuild = os.clock()
+        SourceCount = NewSource and #NewSource:GetDescendants() or 0
+
+        if not NewSource then
+            UpdateInfo()
+            return
+        end
+
+        -- clone the real character (some games mark parts as non-archivable, so flip that temporarily)
+        local Restore = { }
+
+        local Success, NewClone = pcall(function()
+            for _, Descendant in NewSource:GetDescendants() do
+                if not Descendant.Archivable then
+                    Descendant.Archivable = true
+                    table.insert(Restore, Descendant)
+                end
+            end
+
+            local WasArchivable = NewSource.Archivable
+            NewSource.Archivable = true
+
+            local Result = NewSource:Clone()
+
+            NewSource.Archivable = WasArchivable
+            return Result
+        end)
+
+        for _, Descendant in Restore do
+            pcall(function()
+                Descendant.Archivable = false
+            end)
+        end
+
+        if not Success or not NewClone or not NewClone:IsA("Model") then
+            UpdateInfo()
+            return
+        end
+
+        -- pair every part of the clone with its original (same order right after cloning)
+        do
+            local SourceList, CloneList = NewSource:GetDescendants(), NewClone:GetDescendants()
+
+            if #SourceList == #CloneList then
+                for Index, Original in SourceList do
+                    local Copy = CloneList[Index]
+
+                    if Original:IsA("BasePart") and Copy.ClassName == Original.ClassName and Copy.Name == Original.Name then
+                        table.insert(Pairs, {Clone = Copy, Source = Original, Body = BodyNames[Original.Name] == true and Original.Parent == NewSource})
+                    end
+                end
+            end
+
+            local function Root(Model)
+                -- the pelvis / torso gives the real "up" and "front" of the body (the root part can be turned in some games)
+                return Model:FindFirstChild("LowerTorso") or Model:FindFirstChild("Torso")
+                    or Model.PrimaryPart or Model:FindFirstChild("HumanoidRootPart")
+                    or Model:FindFirstChild("UpperTorso")
+            end
+
+            RefPart = Root(NewSource)
+            CloneRef = Root(NewClone)
+        end
+
+        -- strip everything that isn't visual
+        local Remove = { }
+
+        for _, Descendant in NewClone:GetDescendants() do
+            for _, Class in Junk do
+                if Descendant:IsA(Class) then
+                    table.insert(Remove, Descendant)
+                    break
+                end
+            end
+
+            if not Preview.KeepHumanoid and Descendant:IsA("Humanoid") then
+                table.insert(Remove, Descendant)
+            end
+        end
+
+        for _, Descendant in Remove do
+            Descendant:Destroy()
+        end
+
+        for _, Descendant in NewClone:GetDescendants() do
+            if Descendant:IsA("BasePart") then
+                Descendant.Anchored = true
+                Descendant.CanCollide = false
+                Descendant.CanTouch = false
+                Descendant.CanQuery = false
+
+                if Descendant.Name == "HumanoidRootPart" then
+                    Descendant.Transparency = 1
+                end
+
+                Originals[Descendant] = {
+                    Color = Descendant.Color,
+                    Transparency = Descendant.Transparency,
+                    Material = Descendant.Material
+                }
+            end
+        end
+
+        -- keep the humanoid (it is what makes the shirt / pants / face render) but hide its overhead ui
+        local CloneHumanoid = NewClone:FindFirstChildOfClass("Humanoid")
+
+        if CloneHumanoid then
+            pcall(function()
+                CloneHumanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+                CloneHumanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+                CloneHumanoid.EvaluateStateMachine = false
+            end)
+        end
+
+        local Pivot = (RefPart and CloneRef) and CloneRef.CFrame or NewClone:GetPivot()
+        local BoxCFrame, BoxSize = NewClone:GetBoundingBox()
+
+        Center = Pivot:ToObjectSpace(BoxCFrame).Position
+
+        -- scale from the real body height (head top to feet bottom)
+        local BodyHeight = BoxSize.Y
+
+        if RefPart and RefPart.Parent then
+            local Min, Max = Measure(CFrame.identity, GetRels())
+
+            if Min and Max and Max.Y - Min.Y > 0.5 then
+                BodyHeight = Max.Y - Min.Y
+            end
+        end
+
+        FitCamera(BodyHeight)
+
+        Clone = NewClone
+        Clone.Parent = Items["Viewport"].Instance
+
+        for Index, Chain in Chains do
+            local Link = Items["Skeleton"][Index]
+
+            if Link then
+                Link.A = FindPart(Chain[1])
+                Link.B = FindPart(Chain[2])
+            end
+        end
+
+        ApplyChams()
+        ApplyPose()
+        UpdateInfo()
+
+        warn(("[ESPPreview] showing %s | parts: %d | humanoid kept: %s | height: %.2f studs"):format(
+            NewSource.Name, #Pairs, tostring(CloneHumanoid ~= nil and Preview.KeepHumanoid), BodyHeight
+        ))
+    end
+
+    local ValidCharacter = function(Character)
+        return Character ~= nil and Character.Parent ~= nil
+            and (Character:FindFirstChild("HumanoidRootPart") ~= nil or Character:FindFirstChild("Head") ~= nil)
+    end
+
+    -- who to show: explicit target, otherwise you, otherwise any other player (Players / workspace.<name>)
+    local Resolve = function()
+        local Target = Preview.Target
+
+        if typeof(Target) == "Instance" then
+            if Target:IsA("Player") then
+                return Target.Character, Target
+            elseif Target:IsA("Model") then
+                return Target, Players:GetPlayerFromCharacter(Target)
+            end
+        elseif type(Target) == "string" and Target ~= "" then
+            local Lower = Target:lower()
+
+            for _, Player in Players:GetPlayers() do
+                if Player.Name:lower() == Lower or Player.DisplayName:lower() == Lower then
+                    return Player.Character, Player
+                end
+            end
+
+            local Model = workspace:FindFirstChild(Target)
+
+            if Model and Model:IsA("Model") then
+                return Model, Players:GetPlayerFromCharacter(Model)
+            end
+        end
+
+        if ValidCharacter(LocalPlayer.Character) then
+            return LocalPlayer.Character, LocalPlayer
+        end
+
+        for _, Player in Players:GetPlayers() do
+            if ValidCharacter(Player.Character) then
+                return Player.Character, Player
+            end
+        end
+
+        for _, Model in workspace:GetChildren() do
+            if Model:IsA("Model") and Model:FindFirstChildOfClass("Humanoid") and ValidCharacter(Model) then
+                return Model, Players:GetPlayerFromCharacter(Model)
+            end
+        end
+
+        return nil, nil
+    end
+
+    local Refresh = function()
+        local Full = State.Box and State.BoxStyle ~= "Corner"
+        local Corner = State.Box and State.BoxStyle == "Corner"
+
+        Items["FullBox"].Instance.Visible = Full
+        Items["FullBoxStroke"].Instance.Color = State.BoxColor
+        Items["FullBox"].Instance.BackgroundColor3 = State.BoxFillColor
+        Items["FullBox"].Instance.BackgroundTransparency = (State.Box and State.BoxFill) and State.BoxFillAlpha or 1
+
+        Items["BoxOuter"].Instance.Visible = State.BoxOutline
+        Items["BoxInner"].Instance.Visible = State.BoxOutline
+
+        for _, Corner_ in Items["Corners"] do
+            Corner_.Piece.Instance.Visible = Corner
+            Corner_.Piece.Instance.BackgroundTransparency = State.BoxOutline and 0 or 1
+            Corner_.Line.Instance.BackgroundColor3 = State.BoxColor
+        end
+
+        Items["NameText"].Instance.Visible = State.Name
+        Items["NameText"].Instance.TextColor3 = State.NameColor
+
+        Items["DistanceText"].Instance.Visible = State.Distance
+        Items["DistanceText"].Instance.TextColor3 = State.DistanceColor
+
+        Items["WeaponText"].Instance.Visible = State.Weapon
+        Items["WeaponText"].Instance.TextColor3 = State.WeaponColor
+
+        for _, Link in Items["Skeleton"] do
+            Link.Line.Instance.BackgroundColor3 = State.SkeletonColor
+        end
+
+        ApplyChams()
+        UpdateSkeleton()
+        UpdateHealth()
+    end
+
+    -- Key: any key in State (see top). Value: bool / color / string / number
+    function Preview:Set(Key, Value)
+        if State[Key] == nil then
+            return
+        end
+
+        if type(Value) == "table" and Value.Color then
+            Value = Value.Color
+        end
+
+        if State[Key] == Value then
+            return
+        end
+
+        State[Key] = Value
+
+        if Key == "HealthValue" then
+            UpdateHealth()
+        else
+            Refresh()
+        end
+    end
+
+    function Preview:SetMany(Settings)
+        for Key, Value in Settings do
+            Preview:Set(Key, Value)
+        end
+    end
+
+    function Preview:SetYaw(Radians)
+        Preview.Yaw = Radians % (math.pi * 2)
+        ApplyPose()
+    end
+
+    -- up / down tilt (radians), so the model can be turned in every direction
+    function Preview:SetPitch(Radians)
+        Preview.Pitch = Radians % (math.pi * 2)
+        ApplyPose()
+    end
+
+    -- Player | Model | "name" | nil (auto)
+    function Preview:SetTarget(Target)
+        Preview.Target = Target
+        Preview.Dirty = true
+    end
+
+    -- re-clones the model (use after the shown player changes outfit)
+    function Preview:Refresh()
+        Preview.Dirty = true
+    end
+
+    -- overrides for the live text; pass nil to go back to the live value
+    function Preview:SetName(Text)
+        Preview.Overrides.Name = Text ~= nil and tostring(Text) or nil
+        UpdateInfo()
+    end
+
+    function Preview:SetDistance(Text)
+        Preview.Overrides.Distance = Text ~= nil and tostring(Text) or nil
+        UpdateInfo()
+    end
+
+    function Preview:SetWeapon(Text)
+        Preview.Overrides.Weapon = Text ~= nil and tostring(Text) or nil
+        UpdateInfo()
+    end
+
+    function Preview:SetText(Text)
+        Items["Title"].Instance.Text = tostring(Text)
+    end
+
+    -- Map preview keys to Library flags. The preview follows them live.
+    -- Preview:Bind({Box = "ESPBox", BoxColor = "ESPBoxColor", BoxStyle = "ESPBoxStyle", HealthLow = "ESPHealthLow", ...})
+    function Preview:Bind(Map)
+        Preview.Binds = Map
+    end
+
+    function Preview:Unbind()
+        Preview.Binds = nil
+    end
+
+    -- puts the preview on the right side of the gui (falls back to the left if there is no room)
+    function Preview:Dock()
+        local Win = Library.CurrentWindow
+        local Main = Win and Win.Items and Win.Items["MainFrame"] and Win.Items["MainFrame"].Instance
+
+        if not Main then
+            return
+        end
+
+        local Frame = Items["Preview"].Instance
+        local Gap = 10
+        local ScreenWidth = Library.Holder.Instance.AbsoluteSize.X
+
+        local X = Main.AbsolutePosition.X + Main.AbsoluteSize.X + Gap
+
+        if X + Frame.AbsoluteSize.X > ScreenWidth - 8 then
+            X = Main.AbsolutePosition.X - Gap - Frame.AbsoluteSize.X
+        end
+
+        X = math.clamp(X, 8, math.max(ScreenWidth - Frame.AbsoluteSize.X - 8, 8))
+
+        Frame.AnchorPoint = Vector2.new(0, 0)
+        Frame.Position = UDim2.new(0, X, 0, Main.AbsolutePosition.Y + GuiInset)
+    end
+
+    function Preview:Open()
+        if not Library.ESPPreviewEnabled then
+            return
+        end
+
+        Preview:Dock()
+        Preview.Shown = true
+        Preview.Dirty = true
+        Items["Preview"]:FadeDescendants(true)
+    end
+
+    function Preview:Close()
+        Preview.Shown = false
+        Items["Preview"]:FadeDescendants(false)
+    end
+
+    function Preview:Destroy()
+        Preview.Binds = nil
+        Preview.Shown = false
+        ClearModel()
+        Items["Preview"].Instance:Destroy()
+
+        if Library.ESPPreviewObject == Preview then
+            Library.ESPPreviewObject = nil
+        end
+    end
+
+    -- rotating: left mouse / touch drag turns the model, right mouse resets it
+    local Dragging = false
+    local LastX, LastY = 0, 0
+
+    Items["Rotate"]:Connect("InputBegan", function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+            Dragging = true
+            LastX, LastY = Input.Position.X, Input.Position.Y
+        elseif Input.UserInputType == Enum.UserInputType.MouseButton2 then
+            Preview.Pitch = 0
+            Preview:SetYaw(0)
+        end
+    end)
+
+    Library:Connect(UserInputService.InputChanged, function(Input)
+        if not Dragging then
+            return
+        end
+
+        if Input.UserInputType == Enum.UserInputType.MouseMovement or Input.UserInputType == Enum.UserInputType.Touch then
+            local Delta = Input.Position.X - LastX
+            local DeltaY = Input.Position.Y - LastY
+            LastX, LastY = Input.Position.X, Input.Position.Y
+
+            Preview.Pitch = (Preview.Pitch + math.rad(DeltaY * 1.2)) % (math.pi * 2)
+            Preview:SetYaw(Preview.Yaw + math.rad(Delta * 1.2))
+        end
+    end)
+
+    Library:Connect(UserInputService.InputEnded, function(Input)
+        if Input.UserInputType == Enum.UserInputType.MouseButton1 or Input.UserInputType == Enum.UserInputType.Touch then
+            Dragging = false
+        end
+    end)
+
+    local Elapsed = 0
+    local PoseWarned = false
+
+    Library:Connect(RunService.RenderStepped, function(Delta)
+        if not Preview.Shown then
+            return
+        end
+
+        local Binds = Preview.Binds
+
+        if Binds then
+            for Key, Flag in Binds do
+                local Value = Library.Flags[Flag]
+
+                if Value ~= nil then
+                    if type(Value) == "table" and Value.Color then
+                        Value = Value.Color
+                    elseif type(Value) == "table" and Value.Toggled ~= nil then
+                        Value = Value.Toggled
+                    elseif type(Value) == "table" then
+                        Value = nil
+                    end
+
+                    if Value ~= nil then
+                        Preview:Set(Key, Value)
+                    end
+                end
+            end
+        end
+
+        -- auto spin (pauses while you are dragging the model yourself)
+        if State.AutoRotate and not Dragging then
+            Preview.Yaw = (Preview.Yaw + math.rad(State.RotateSpeed) * Delta) % (math.pi * 2)
+        end
+
+        -- animated health, same sine wave as Atlanta's preview
+        if State.AnimateHealth then
+            Preview:Set("HealthValue", math.abs(math.sin(os.clock() * 2)) * 100)
+        end
+
+        local PoseOk, PoseError = pcall(ApplyPose)
+
+        if not PoseOk then
+            if not PoseWarned then
+                PoseWarned = true
+                warn("[ESPPreview] pose failed: " .. tostring(PoseError))
+            end
+
+            if Preview.KeepHumanoid then
+                Preview.KeepHumanoid = false
+                Preview.Dirty = true
+            end
+        end
+
+        -- the clone vanished (e.g. the humanoid removed it): rebuild without the humanoid
+        if Clone and (Clone.Parent ~= Items["Viewport"].Instance or not Clone:FindFirstChildWhichIsA("BasePart", true)) then
+            warn("[ESPPreview] the preview model disappeared, rebuilding without the humanoid")
+            Preview.KeepHumanoid = false
+            Preview.Dirty = true
+        end
+
+        Elapsed += Delta
+
+        if Elapsed < 0.25 and not Preview.Dirty then
+            return
+        end
+
+        Elapsed = 0
+
+        local NewSource, NewPlayer = Resolve()
+
+        if Preview.Dirty or NewSource ~= Source then
+            Preview.Dirty = false
+
+            local Ok, Err = pcall(Build, NewSource, NewPlayer)
+
+            if not Ok then
+                warn("[ESPPreview] build failed: " .. tostring(Err))
+            end
+        elseif NewSource and #NewSource:GetDescendants() ~= SourceCount and os.clock() - LastBuild > 1.5 then
+            -- outfit / tool changed on the shown player
+            local Ok, Err = pcall(Build, NewSource, NewPlayer)
+
+            if not Ok then
+                warn("[ESPPreview] build failed: " .. tostring(Err))
+            end
+        else
+            UpdateInfo()
+        end
+    end)
+
+    Refresh()
+    UpdateInfo()
+
+    Library.ESPPreviewObject = Preview
+
+    local Win = Library.CurrentWindow
+
+    if Library.ESPPreviewEnabled and Win and Win.IsOpen then
+        Preview:Open()
+    end
+
+    return setmetatable(Preview, Library)
+end
